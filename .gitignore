@@ -3,4 +3,10 @@ build/ihook.so
 build/ihook-cli
 build/libdemo.so
 build/demo
+build/libihook_engine.so
+build/libunittest_target.so
+build/libunit_lazy.so
+build/libunit_plugin.so
+build/test_engine_internal
+build/test_engine_api
 python/__pycache__/

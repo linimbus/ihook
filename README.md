@@ -37,7 +37,13 @@
 │   ├── libdemo.cpp             # 多类共享库（Account/Shape/Circle/...）
 │   └── demo_main.cpp           # 多线程测试驱动
 └── tests/
-    └── smoke.sh                # 端到端测试
+    ├── smoke.sh                # 端到端测试
+    └── unit/
+        ├── test_engine_internal.c   # 白盒单元测试（包含引擎源码）
+        ├── test_engine_api.cpp      # 公共 API / GOT 集成单元测试
+        ├── unit_target.cpp/.h       # 测试目标库（C 函数 + C++ 类）
+        ├── unit_lazy.c              # lazy binding 测试库
+        └── unit_plugin.c            # dlopen/dlclose 测试插件
 ```
 
 构建产物：
@@ -515,9 +521,65 @@ sleep 3
 
 ## 10. 测试
 
+### 10.1 运行
+
 ```bash
-make test
+make test          # 端到端 + 单元测试
+make test-unit     # 仅核心引擎单元测试
+./build/test_engine_internal
+./build/test_engine_api
 ```
+
+产物：
+
+| 文件 | 说明 |
+| --- | --- |
+| `build/libihook_engine.so` | 仅引擎（不含 socket 服务端），供单元测试加载 |
+| `build/test_engine_internal` | 白盒单元测试 |
+| `build/test_engine_api` | 公共 API / 真实 GOT 集成单元测试 |
+
+### 10.2 白盒单元测试（`test_engine_internal.c`）
+
+该测试直接 `#include "../../src/server/hook_engine.c"`，因此可以测试静态函数和内部状态，并链接 `trampoline.S`：
+
+| 用例 | 覆盖点 |
+| --- | --- |
+| `test_module_matching` | 模块 basename / glob / 完整路径匹配，`same_module_path` |
+| `test_lazy_detection` | 经典 PLT lazy stub、CET `bnd jmp`、非 lazy 代码、NULL |
+| `test_got_patch` | `mprotect` 加写、原子写 GOT、恢复只读权限、未映射地址失败 |
+| `test_hash_table` | 槽地址哈希插入/查找/未命中 |
+| `test_trampoline_enter` | enter 模式：参数传递、调用计数、原函数返回值 |
+| `test_trampoline_enter_exit` | enter_exit：进入/返回计数、TSC 周期、TLS 栈平衡 |
+| `test_trampoline_double_return` | SSE 返回值（`double`）在 exit 后保持 |
+| `test_trampoline_variadic` | 可变参数：`%al` + XMM 参数保存/恢复 |
+| `test_trampoline_stack_args` | 栈上传参（8 个 long 参数）不被 trampoline 破坏 |
+| `test_frame_overflow` | TLS 返回帧溢出时只记录错误、仍调用原函数 |
+| `test_invalid_slot_id` | 非法槽 ID 进入安全失败路径 |
+| `test_log_json` | hook/error/stats JSONL 生成、引号/反斜杠转义、计数字段 |
+| `test_exit_underflow` | exit trampoline 下溢时以状态 127 终止子进程 |
+
+### 10.3 公共 API / 真实 GOT 单元测试（`test_engine_api.cpp`）
+
+测试进程链接 `libihook_engine.so`、`libunittest_target.so`、`libunit_lazy.so`，用真实的共享库 GOT/PLT 槽验证公共接口：
+
+| 用例 | 覆盖点 |
+| --- | --- |
+| `test_init_and_refresh` | 初始化、`info` 字段、重复 refresh 槽数量稳定、槽查询 |
+| `test_enter_mode_and_unhook` | 安装、命中、卸载、卸载后计数不再增加 |
+| `test_enter_exit_mode` | 100 次调用，calls/returns/cycles/errors 一致 |
+| `test_double_and_variadic_returns` | `double` 返回值、可变参数 ABI |
+| `test_cpp_method_symbol` | 按 mangled 名称插桩真实 C++ 成员函数 |
+| `test_module_filter` | 只插桩指定模块的 `puts` 槽，测试进程自身调用不计入 |
+| `test_duplicate_and_missing` | `already_hooked`、`not_hooked`、`symbol_not_found` |
+| `test_thread_safety` | 4 线程 × 5000 次，原子计数与 TLS 返回帧并发正确 |
+| `test_lazy_binding` | 在首次调用前 hook `lazy_add`，验证 lazy 槽解析与返回值 |
+| `test_dlopen_deactivation_and_extension` | `dlopen` 后自动补挂、`dlclose` 后槽失活、重新加载后扩展 |
+| `test_log_switch` | 切换日志路径、`flush`、非法路径报错 |
+| `test_log_contents` | 最终日志包含 start/hook/unhook/error/stats/exit 事件 |
+
+失败时 API 测试会保留 `/tmp/ihook-unit-api-*` 目录以便排查。
+
+### 10.4 端到端测试（`tests/smoke.sh`）
 
 `tests/smoke.sh` 会：
 
@@ -528,7 +590,8 @@ make test
 5. 卸载并确认 GOT 恢复；
 6. 检查不存在符号的 CLI 报错与日志记录；
 7. 使用 Python CLI 完成 ping/hook/stats/unhook；
-8. 切换日志、flush、检查 JSONL 内容。
+8. 切换日志、flush、检查 JSONL 内容；
+9. 用 `-z lazy` 目标验证首次调用前的 lazy GOT 槽。
 
 测试使用临时 `IHOOK_RUNDIR`，不会污染 `/tmp/ihook`。
 
