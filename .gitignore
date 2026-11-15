@@ -1,0 +1,6 @@
+build/*.o
+build/ihook.so
+build/ihook-cli
+build/libdemo.so
+build/demo
+python/__pycache__/
